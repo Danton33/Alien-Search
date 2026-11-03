@@ -1,0 +1,61 @@
+# Runs the offline test suite. It uses no secrets, has read-only access to the repository, makes
+# no network calls to government sites, and uses only two GitHub-owned actions pinned to exact commits.
+#
+# Linux and Windows run on every push and pull request. The macOS job runs only when started by
+# hand (Actions > tests > Run workflow): GitHub's Mac runners are often unavailable, and a Mac that
+# never arrives would otherwise mark every run as failed even though nothing is wrong with the code.
+# Run it before each release. Keep the steps of both jobs the same.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ['3.10', '3.11', '3.12', '3.13']
+        include:
+          - {os: windows-latest, python: '3.10'}
+          - {os: windows-latest, python: '3.13'}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Generated files are up to date
+        run: python scripts/build_starters.py --check
+      - name: Release privacy audit
+        run: python scripts/audit_release.py
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+
+  macos:
+    name: test (macos-latest, 3.10, run by hand)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.10'
+      - name: Generated files are up to date
+        run: python scripts/build_starters.py --check
+      - name: Release privacy audit
+        run: python scripts/audit_release.py
+      - name: Tests
+        run: python -m unittest discover -s tests -v

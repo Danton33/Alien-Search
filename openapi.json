@@ -1,0 +1,686 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Alien Search local API (unofficial)",
+    "version": "3.3.0",
+    "description": "Unofficial, user-owned, read-only interface to a fixed register of public government sources. Not affiliated with or endorsed by any government agency. Evidence remains candidate until reviewed. Downloads, ZIP handling, imports and link checks are command-line only."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8765"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Local health status",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "JSON result. Check ok, class, evidence_status and, for reads, text_status; a failed read can include official_alternate, archived_copy, alternates and next_steps."
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Local bearer token required"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "summary": "This API specification",
+        "parameters": [],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON result. Check ok, class, evidence_status and, for reads, text_status; a failed read can include official_alternate, archived_copy, alternates and next_steps."
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Local bearer token required"
+          }
+        }
+      }
+    },
+    "/v1/sources": {
+      "get": {
+        "operationId": "listSources",
+        "summary": "Search the saved source register, not the whole web",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "name": "full",
+            "in": "query",
+            "required": false,
+            "description": "1 = full entries even when more than 5 sources match (default: id, title, agency and url only in that case).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON result. Check ok, class, evidence_status and, for reads, text_status; a failed read can include official_alternate, archived_copy, alternates and next_steps."
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Local bearer token required"
+          }
+        }
+      }
+    },
+    "/v1/sources/{source_id}": {
+      "get": {
+        "operationId": "getSource",
+        "summary": "Get a registered government source",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "description": "Saved Alien Search source identifier",
+            "schema": {
+              "type": "string",
+              "pattern": "^A[0-9]{3}$"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON result. Check ok, class, evidence_status and, for reads, text_status; a failed read can include official_alternate, archived_copy, alternates and next_steps."
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Local bearer token required"
+          }
+        }
+      }
+    },
+    "/v1/sources/{source_id}/read": {
+      "get": {
+        "operationId": "readSource",
+        "summary": "Read a bounded government page or document; return provenance, links and text excerpt",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "description": "Saved Alien Search source identifier",
+            "schema": {
+              "type": "string",
+              "pattern": "^A[0-9]{3}$"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Local substring filter over extracted labels and URLs",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "pdf",
+                "archive",
+                "media",
+                "metadata",
+                "catalog",
+                "page"
+              ],
+              "default": "all"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 250,
+              "default": 100
+            }
+          },
+          {
+            "name": "max_chars",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20000,
+              "default": 4000
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "description": "Explicit new source request; enforced Retry-After still applies",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "archive_fallback",
+            "in": "query",
+            "required": false,
+            "description": "When the live page is blocked, missing, disallowed by robots.txt or in the wrong format, attach a clearly labelled archived copy (archived_copy). 1 = on (default), 0 = off.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "1"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON result. Check ok, class, evidence_status and, for reads, text_status; a failed read can include official_alternate, archived_copy, alternates and next_steps."
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Local bearer token required"
+          }
+        }
+      }
+    },
+    "/v1/sources/{source_id}/links": {
+      "get": {
+        "operationId": "listSourceLinks",
+        "summary": "Discover links from the registered page; returns the same structured envelope as read",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "description": "Saved Alien Search source identifier",
+            "schema": {
+              "type": "string",
+              "pattern": "^A[0-9]{3}$"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Local substring filter over extracted labels and URLs",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "pdf",
+                "archive",
+                "media",
+                "metadata",
+                "catalog",
+                "page"
+              ],
+              "default": "all"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 250,
+              "default": 100
+            }
+          },
+          {
+            "name": "max_chars",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20000,
+              "default": 4000
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "description": "Explicit new source request; enforced Retry-After still applies",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "archive_fallback",
+            "in": "query",
+            "required": false,
+            "description": "When the live page is blocked, missing, disallowed by robots.txt or in the wrong format, attach a clearly labelled archived copy (archived_copy). 1 = on (default), 0 = off.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "1"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON result. Check ok, class, evidence_status and, for reads, text_status; a failed read can include official_alternate, archived_copy, alternates and next_steps."
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Local bearer token required"
+          }
+        }
+      }
+    },
+    "/v1/sources/{source_id}/documents/{link_id}": {
+      "get": {
+        "operationId": "inspectLinkedDocument",
+        "summary": "Inspect a previously discovered, allowlisted document link",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "description": "Saved Alien Search source identifier",
+            "schema": {
+              "type": "string",
+              "pattern": "^A[0-9]{3}$"
+            }
+          },
+          {
+            "name": "link_id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{20}$"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON result. Check ok, class, evidence_status and, for reads, text_status; a failed read can include official_alternate, archived_copy, alternates and next_steps."
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Local bearer token required"
+          }
+        }
+      }
+    },
+    "/v1/sources/{source_id}/captures": {
+      "get": {
+        "operationId": "findArchivedCaptures",
+        "summary": "One bounded Wayback index page for the registered original URL",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "description": "Saved Alien Search source identifier",
+            "schema": {
+              "type": "string",
+              "pattern": "^A[0-9]{3}$"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "description": "YYYY[MM[DD[hh[mm[ss]]]]]",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 5
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque next_resume_key from a prior response",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "mimetype",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "text/html",
+                "application/pdf"
+              ],
+              "default": "all"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON result. Check ok, class, evidence_status and, for reads, text_status; a failed read can include official_alternate, archived_copy, alternates and next_steps."
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Local bearer token required"
+          }
+        }
+      }
+    },
+    "/v1/sources/{source_id}/closest": {
+      "get": {
+        "operationId": "nearestHistoricalCapture",
+        "summary": "Find nearest capture; later-than-requested captures are flagged",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^A[0-9]{3}$"
+            }
+          },
+          {
+            "name": "timestamp",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Structured capture evidence or explicit archive error; check ok, class, capture dates and text_status."
+          },
+          "400": {
+            "description": "Invalid source ID, timestamps or bounds"
+          },
+          "401": {
+            "description": "Bearer token required"
+          }
+        }
+      }
+    },
+    "/v1/sources/{source_id}/snapshots/{timestamp}": {
+      "get": {
+        "operationId": "readExactHistoricalSnapshot",
+        "summary": "Read an exact HTML/text or PDF snapshot; validates original identity, UTC capture and Memento-Datetime",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^A[0-9]{3}$"
+            }
+          },
+          {
+            "name": "timestamp",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{14}$"
+            }
+          },
+          {
+            "name": "max_chars",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20000,
+              "default": 4000
+            }
+          }
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Structured capture evidence or explicit archive error; check ok, class, capture dates and text_status."
+          },
+          "400": {
+            "description": "Invalid source ID, timestamps or bounds"
+          },
+          "401": {
+            "description": "Bearer token required"
+          }
+        }
+      }
+    },
+    "/v1/sources/{source_id}/compare": {
+      "get": {
+        "operationId": "compareHistoricalSnapshots",
+        "summary": "Bounded extracted-text comparison of two exact captures",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^A[0-9]{3}$"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{14}$"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{14}$"
+            }
+          },
+          {
+            "name": "max_chars",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20000,
+              "default": 4000
+            }
+          }
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Structured capture evidence or explicit archive error; check ok, class, capture dates and text_status."
+          },
+          "400": {
+            "description": "Invalid source ID, timestamps or bounds"
+          },
+          "401": {
+            "description": "Bearer token required"
+          }
+        }
+      }
+    }
+  }
+}
