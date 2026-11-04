@@ -91,6 +91,52 @@ def load_json(path,default=None,expect=None,keep_corrupt=False):
         with contextlib.suppress(OSError): os.replace(p,p.with_name(p.name+'.corrupt-'+time.strftime('%Y%m%d%H%M%S')))
     return default
 
+@contextlib.contextmanager
+def file_lock(path,timeout=30.0):
+    """Hold an exclusive lock for path across threads and separate processes (standard library only).
+
+    The lock lives in a hidden .NAME.lock file beside path, which is left in place: deleting a lock
+    file while another process waits on it would let two writers in. POSIX uses flock and Windows
+    uses msvcrt.locking; both lock per open handle, so two threads in one process also exclude each
+    other. Raises TimeoutError if the lock is not free within timeout seconds.
+    """
+    p=pathlib.Path(path)
+    lock=p.with_name('.'+p.name+'.lock')
+    if lock.is_symlink(): raise ValueError('Refusing a symbolic lock file: '+lock.name)
+    fd=os.open(lock,os.O_RDWR|os.O_CREAT|PRIVATE_OPEN,0o600)
+    deadline=time.monotonic()+timeout
+    try:
+        if os.name=='nt':
+            import msvcrt
+            def take(): os.lseek(fd,0,os.SEEK_SET); msvcrt.locking(fd,msvcrt.LK_NBLCK,1)
+            def give(): os.lseek(fd,0,os.SEEK_SET); msvcrt.locking(fd,msvcrt.LK_UNLCK,1)
+        else:
+            import fcntl
+            def take(): fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            def give(): fcntl.flock(fd,fcntl.LOCK_UN)
+        while True:
+            try: take(); break
+            except OSError:
+                if time.monotonic()>=deadline: raise TimeoutError('Another Alien Search process is still updating '+p.name) from None
+                time.sleep(0.02)
+        try: yield
+        finally:
+            with contextlib.suppress(OSError): give()
+    finally:
+        os.close(fd)
+
+def update_json(path,change,default=None,expect=None,keep_corrupt=False,indent=None):
+    """Read, change and atomically rewrite a JSON state file as one locked step.
+
+    atomic_write alone stops half-written files; this also stops two writers (threads or separate
+    CLI processes) from each reading the old value and one silently discarding the other's update.
+    change(value) returns the new value. Returns what was written.
+    """
+    with file_lock(path):
+        value=change(load_json(path,default,expect=expect,keep_corrupt=keep_corrupt))
+        write_json(path,value,indent=indent)
+        return value
+
 def file_sha256(path):
     digest=hashlib.sha256()
     with open(path,'rb') as f:

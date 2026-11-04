@@ -1,5 +1,27 @@
 # Changelog
 
+## 3.3.1 — November 4, 2026
+
+Patch release for four findings from a coding audit of 3.3.0 (F1, F3, F4, F5). The research method, starter, guide, framework and source register are unchanged, so the model evaluation cases do not need re-running for this release. Bounded continuation for long documents and links (F2) and scoped snapshot-comparison fields are planned for 3.4.0, because they add to the command line and HTTP API.
+
+### Scanned PDFs are no longer reported as fully read (F1)
+- A PDF page counts as read only if it yields visible text; a page label alone is not text. An image-only (scanned) PDF now reports `text_status` `none` with no text, and a mix of text and scanned pages reports `partial`.
+- PDF results include `pages_with_text` and, when some pages had no text layer, `pages_without_text` (compact ranges such as `1-3, 7`), and `next_steps` tells the assistant not to describe those pages. Applies to live reads, archive snapshots and imported files. OCR is still not performed.
+- Cached reads from earlier versions are redone once (cache format 3), so old "complete" labels on scans do not linger.
+
+### A site's pause applies to the whole site (F3)
+- An HTTP 429 now pauses every request to that site, whichever source hit it: other sources on the same host, downloads, size checks, link checks, robots.txt and official API calls all wait, and `--refresh` does not override it. `www.` and bare host names share one pause. Other sites stay usable.
+- The pause is kept in the state folder (`site-pauses.json`), so separate copies of the tool and the local server honour it. A longer pause is never shortened by a later, shorter one. Internet Archive rate limits feed the same pause.
+
+### Index entries are no longer lost when two operations finish together (F4)
+- Download, import and extraction indexes are updated in one locked step (a standard-library file lock that works on Linux, macOS and Windows, across threads and separate processes). Previously two operations finishing at the same moment could each read the old index and one entry would be dropped. Files stay JSON in the same places; atomic writes and damaged-index handling are unchanged.
+
+### Results keep the retry delay (F5)
+- Every result that asks the caller to wait now has `retry_after_seconds` and `retry_at` (UTC), plus `retry_after` with the server's own header value when it sent one. This covers command-line errors (which previously dropped the delay), HTTP API errors, reads and archive calls. A rate limit with no Retry-After, or one that cannot be parsed, means one hour, as before.
+
+### Tests
+- 20 new tests (`tests/test_v331.py`), including four processes appending to one index at once and a real image-only PDF when PyMuPDF is installed. All 170 earlier tests still pass.
+
 ## 3.3.0 — November 3, 2026
 
 Corrective release after an independent review: evidence integrity, safe private state, site rules on redirects and clearer results. The research method and starter structure are unchanged apart from the wording noted below, and the register gains two dated notes.

@@ -17,7 +17,7 @@ import zipfile
 
 from common import VERSION, Problem, envelope, utc, text_status
 from secure_http import TransportError, probe, download as stream_download
-from storage import private_dir, write_json, load_json, store_object
+from storage import private_dir, write_json, load_json, store_object, update_json
 
 SHA_RE = re.compile(r'[a-f0-9]{64}')
 DEFAULT_DOWNLOAD_MB = 500
@@ -35,11 +35,25 @@ def size_text(n):
 
 
 # --- PDF text ---------------------------------------------------------------------------
+def page_ranges(numbers):
+    """Compact page list for results: [1,2,3,7] -> '1-3, 7' (stays short for a 900-page scan)."""
+    out=[]; start=prev=None
+    for n in numbers:
+        if prev is not None and n==prev+1: prev=n; continue
+        if start is not None: out.append(str(start) if start==prev else '%d-%d'%(start,prev))
+        start=prev=n
+    if start is not None: out.append(str(start) if start==prev else '%d-%d'%(start,prev))
+    return ', '.join(out)
+
+
 def pdf_text(data, limit=20000):
     """Extract text with optional PyMuPDF. Locked PDFs are labelled, never cracked.
 
-    Returns pages, text, text_complete, text_extraction and locked. Raises ValueError when the
-    parser rejects a document that is not locked.
+    Returns pages, text, text_complete, text_extraction and locked; when the parser ran, also
+    has_text, pages_examined, pages_with_text and pages_without_text. text_complete is True only
+    when every page was reached and every page yielded text: an image-only (scanned) page has no
+    text layer, so it was not read. Raises ValueError when the parser rejects a document that is
+    not locked.
     """
     try:
         import fitz
@@ -58,18 +72,28 @@ def pdf_text(data, limit=20000):
         if locked:
             return {'pages':pages,'text':'','text_complete':False,'locked':True,
                     'text_extraction':'unavailable; the PDF is password-protected (only an empty password was tried)'}
-        text=''; complete=True
+        text=''; complete=True; with_text=0; without=[]; examined=0
         try:
             for i,page in enumerate(doc):
-                text+='[PDF page %d] %s\n'%(i+1,page.get_text())
+                body=page.get_text(); examined=i+1
+                # A page label is not text: a page counts as read only if it yields visible characters.
+                if body.strip(): with_text+=1
+                else: without.append(i+1)
+                text+='[PDF page %d] %s\n'%(i+1,body)
                 if len(text)>limit: complete=False; break
         except Exception:
             if getattr(doc,'is_encrypted',False):
                 return {'pages':pages,'text':'','text_complete':False,'locked':True,
                         'text_extraction':'unavailable; the PDF is encrypted and its text could not be read'}
             raise ValueError('PDF parser rejected document') from None
-        return {'pages':pages,'text':text[:limit],'text_complete':complete,'locked':False,
-                'text_extraction':'pymupdf; OCR not performed'}
+        coverage={'pages_examined':examined,'pages_with_text':with_text,'pages_without_text':page_ranges(without)}
+        if not with_text:
+            # Typically a scan: pages are images and nothing on them was read.
+            return {'pages':pages,'text':'','text_complete':False,'has_text':False,'locked':False,**coverage,
+                    'text_extraction':'pymupdf; no text layer found (pages are probably scanned images); OCR not performed'}
+        return {'pages':pages,'text':text[:limit],'text_complete':complete and not without,'text_cut':not complete,
+                'has_text':True,'locked':False,**coverage,
+                'text_extraction':'pymupdf; OCR not performed'+('; %d page(s) have no text layer'%len(without) if without else '')}
     finally:
         doc.close()
 
@@ -77,8 +101,9 @@ def pdf_text(data, limit=20000):
 # --- small private index files ---------------------------------------------------------------
 def _append_index(path,entry):
     """Add one entry to a private index. A damaged index is set aside (NAME.corrupt-TIME), never silently dropped."""
-    items=load_json(path,[],expect=list,keep_corrupt=True)
-    items.append(entry); write_json(path,items,indent=1)
+    # One locked read-change-write, so concurrent downloads, imports and extractions (threads or
+    # separate CLI processes sharing a state folder) never lose each other's entries.
+    update_json(path,lambda items: items+[entry],default=[],expect=list,keep_corrupt=True,indent=1)
 
 
 def _read_index(path):
@@ -127,7 +152,7 @@ def download(records,sid,link_id=None,confirm=False,max_mb=DEFAULT_DOWNLOAD_MB,v
     host=urllib.parse.urlsplit(url).hostname
     records.pace(host)
     try: info=probe(url,hosts,extra_headers=extra,on_redirect=follow)
-    except TransportError as e: raise records.transport_problem(e) from None
+    except TransportError as e: raise records.transport_problem(e,url) from None
     size=info['content_length']; limit=max_mb*MB
     summary=dict(source_id=sid,link_id=link_id,via=via,url=url,final_url=info['final_url'],content_type=info['content_type'],
                  size_bytes=size,size_mb=round(size/MB,1) if size is not None else None,max_mb=max_mb)
@@ -149,7 +174,7 @@ def download(records,sid,link_id=None,confirm=False,max_mb=DEFAULT_DOWNLOAD_MB,v
     part=parts/(hashlib.sha256(url.encode()).hexdigest()[:32]+'.part')
     records.pace(host)
     try: got=stream_download(url,hosts,part,limit,extra_headers=extra,on_redirect=follow)
-    except TransportError as e: raise records.transport_problem(e) from None
+    except TransportError as e: raise records.transport_problem(e,url) from None
     dest,stored=_store_object(records,part,got['sha256'])
     head=_head(dest)
     entry={'source_id':sid,'link_id':link_id,'via':via,'url':url,'final_url':got['final_url'],'sha256':got['sha256'],
@@ -360,7 +385,8 @@ def import_file(records,sid,path,from_url=None,verify_archive=False,max_chars=20
     _append_index(private_dir(records.state/'imports')/'index.json',entry)
     return envelope(**entry,stored_as=stored,is_pdf=head.startswith(b'%PDF'),archive_check=archive_check,
                     pdf_pages=pdf['pages'] if pdf else None,text_extraction=pdf['text_extraction'] if pdf else None,
-                    text_status=text_status('pdf',pdf) if pdf else None,text_excerpt=text)
+                    text_status=text_status('pdf',pdf) if pdf else None,text_excerpt=text,
+                    **{k:pdf[k] for k in ('pages_with_text','pages_without_text') if pdf and k in pdf and pdf[k]!=''})
 
 
 def _match_phrase(match):
@@ -389,7 +415,7 @@ def verify_sources(records,ids=None):
         except Problem as e:
             row.update(ok=False,**{'class':e.kind},reason=str(e))
         except TransportError as e:
-            problem=records.transport_problem(e); row.update(ok=False,**{'class':problem.kind},reason=str(problem))
+            problem=records.transport_problem(e,s['url']); row.update(ok=False,**{'class':problem.kind},reason=str(problem))
         rows.append(row)
     counts=dict(collections.Counter(r['class'] for r in rows))
     stamp=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')

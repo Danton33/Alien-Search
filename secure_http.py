@@ -21,9 +21,10 @@ PRIVATE_OPEN = getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)  # neve
 
 
 class TransportError(Exception):
-    def __init__(self,message,kind='network',status=None,retry_after=None,retry_later=False):
+    def __init__(self,message,kind='network',status=None,retry_after=None,retry_later=False,host=None):
         super().__init__(message)
         self.kind,self.status,self.retry_after,self.retry_later=kind,status,retry_after,retry_later
+        self.host=host  # the host that answered (after redirects), so a rate limit can pause that whole site
 
 
 def user_agent():
@@ -104,7 +105,7 @@ def _request(url,hosts,timeout,extra_headers=None,range_from=None,if_range=None,
                 if on_redirect: on_redirect(url)
                 continue
             if response.status not in (200,206) or (response.status==206 and not range_from):
-                raise TransportError('Public source returned HTTP '+str(response.status),kind='error',status=response.status,retry_after=response.getheader('Retry-After'))
+                raise TransportError('Public source returned HTTP '+str(response.status),kind='error',status=response.status,retry_after=response.getheader('Retry-After'),host=p.hostname)
             if (response.getheader('Content-Encoding','identity') or 'identity').lower()!='identity':
                 raise TransportError('Unexpected encoded response',kind='drift')
             return connection,response,url

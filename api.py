@@ -4,12 +4,11 @@ Not affiliated with or endorsed by any government agency."""
 from __future__ import annotations
 import argparse, copy, datetime as dt, getpass, hashlib, hmac, ipaddress, json, os, pathlib, socket, sys
 import difflib
-from common import UNOFFICIAL, Problem, envelope, problem_envelope, utc, decode_text, text_status, TEXT_TYPES
+from common import UNOFFICIAL, Problem, envelope, problem_envelope, utc, decode_text, text_status, TEXT_TYPES, retry_delay, retry_fields, MAX_RETRY_AFTER
 from secure_http import fetch, TransportError
-from storage import private_dir, load_or_create_token, default_data_dir, print_json, write_json, load_json, store_object
+from storage import private_dir, load_or_create_token, default_data_dir, print_json, write_json, load_json, store_object, update_json
 import acquire, robots
 import re, threading, time, urllib.parse
-from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -18,22 +17,33 @@ MAX_BYTES = 20 * 1024 * 1024
 TTL = 86400            # successful source reads and snapshots
 FAIL_TTL = 900         # blocked/missing/drift/robots results are reused for 15 minutes unless refresh is requested
 TRANSIENT = {'network', 'error'}  # transport, DNS and server errors: never served from cache
-MAX_RETRY_AFTER = 86400  # a server's Retry-After is honoured for at most 24 hours
 GOV_INTERVAL = 2.0     # seconds between requests to the same government host
 ARCHIVE_INTERVAL = 5.0 # seconds between Internet Archive requests
 ARCHIVE_HOSTS = {'web.archive.org', 'archive.org'}
 EXTRA_HOSTS = {'archive.dni.gov','media.defense.gov','cdn.nationalarchives.gov.uk','geipan.fr','www.cnes-geipan.fr','war.gov','defense.gov'}
 FALLBACK_CLASSES = {'blocked','missing','drift','robots'}
-CACHE_FORMAT = 2       # bump when parsing changes, so cached reads are redone with the new rules
+CACHE_FORMAT = 3       # bump when parsing changes, so cached reads are redone with the new rules
 KINDS = ('all','pdf','archive','media','metadata','catalog','page')
 
-def retry_delay(value, now):
-    """Seconds to wait for a Retry-After header (delta-seconds or HTTP-date), clamped to 1..MAX_RETRY_AFTER."""
-    try: delay=int(value)
-    except (ValueError,TypeError):
-        try: delay=parsedate_to_datetime(value).timestamp()-now
-        except (ValueError,TypeError,OverflowError): delay=3600
-    return min(MAX_RETRY_AFTER,max(1,delay))
+def site_key(host):
+    """One pause per site: www.example.gov and example.gov share a rate-limit cooldown."""
+    host=(host or '').lower().rstrip('.')
+    return host[4:] if host.startswith('www.') else host
+
+def transport_problem(e):
+    """Plain Problem for a transport error. Records.transport_problem also pauses a rate-limited site."""
+    kind={401:'blocked',403:'blocked',404:'missing',410:'missing',429:'rate'}.get(e.status,e.kind)
+    # Rate limits, dropped connections and interrupted or discarded downloads are worth trying again later.
+    later=e.status==429 or kind in TRANSIENT or getattr(e,'retry_later',False)
+    return Problem(kind,str(e),'after_wait' if later else 'no',e.retry_after)
+
+def pdf_coverage(info):
+    """Page coverage fields for a result: how many pages yielded text and which (scans) did not."""
+    out={}
+    if info and 'pages_with_text' in info:
+        out['pages_with_text']=info['pages_with_text']
+        if info.get('pages_without_text'): out['pages_without_text']=info['pages_without_text']
+    return out
 
 def with_variants(hosts):
     """Treat example.gov and www.example.gov as the same site (PURSUE files live on bare war.gov)."""
@@ -94,6 +104,7 @@ class Records:
         self.cache=private_dir(self.state/'cache')
         self.runtime=private_dir(self.state/'runtime')
         self.objects=private_dir(self.state/'objects')
+        self.cooldowns=self.state/'site-pauses.json'
         self.io_lock=threading.RLock(); self.lock=threading.Lock(); self.last={}; self.archive_lock=threading.Lock()
     def source(self, sid):
         if sid not in self.byid:
@@ -126,18 +137,38 @@ class Records:
         for info in addresses:
             if not ipaddress.ip_address(info[4][0]).is_global: raise Problem('input','Non-public destination address refused')
         return url
+    # --- site pauses (HTTP 429) ----------------------------------------------------
+    # A rate limit pauses the whole site, not just the source that hit it, and the pause is kept in
+    # the state folder so separate CLI runs and the local server all honour it. Every request this
+    # tool makes (reads, redirects, robots.txt, size checks, downloads, official APIs, link checks,
+    # archive calls) passes through pace(), so that is where the pause is enforced.
+    def note_rate(self,host,retry_after):
+        """Record a site's pause; an existing longer pause is never shortened. Returns its end (epoch seconds)."""
+        now=time.time(); until=now+retry_delay(retry_after,now); key=site_key(host)
+        def change(pauses):
+            pauses={k:v for k,v in pauses.items() if isinstance(v,(int,float)) and v>now}  # drop expired pauses
+            pauses[key]=max(pauses.get(key,0),until)
+            return pauses
+        return update_json(self.cooldowns,change,default={},expect=dict)[key]
+    def paused_until(self,host):
+        until=load_json(self.cooldowns,{},expect=dict).get(site_key(host))
+        return until if isinstance(until,(int,float)) and until>time.time() else None
     def pace(self,host,interval=None):
+        until=self.paused_until(host)
+        if until:
+            raise Problem('rate',str(host)+' asked automated tools to pause; no request was sent. Other sources on this site wait too.','after_wait',not_before=until)
         interval=interval if interval is not None else (ARCHIVE_INTERVAL if host in ARCHIVE_HOSTS else GOV_INTERVAL)
         with self.lock:
             gap=interval-(time.monotonic()-self.last.get(host,-1e9))
             if gap>0: time.sleep(gap)
             self.last[host]=time.monotonic()
-    @staticmethod
-    def transport_problem(e):
-        kind={401:'blocked',403:'blocked',404:'missing',410:'missing',429:'rate'}.get(e.status,e.kind)
-        # Rate limits, dropped connections and interrupted or discarded downloads are worth trying again later.
-        later=e.status==429 or kind in TRANSIENT or getattr(e,'retry_later',False)
-        return Problem(kind,str(e),'after_wait' if later else 'no',e.retry_after)
+    def transport_problem(self,e,url=None):
+        """Problem for a transport error; an HTTP 429 also pauses that whole site (see note_rate)."""
+        problem=transport_problem(e)
+        if problem.kind=='rate':
+            host=getattr(e,'host',None) or (urllib.parse.urlsplit(url).hostname if url else None)
+            if host: problem.not_before=self.note_rate(host,e.retry_after)
+        return problem
     # --- robots.txt (RFC 9309) -------------------------------------------------
     def _robots_entry(self,host):
         path=self.cache/('robots-'+re.sub(r'[^a-z0-9.-]','_',host.lower())+'.json'); now=time.time()
@@ -148,6 +179,7 @@ class Records:
             body,_,_=fetch('https://'+host+'/robots.txt',self.hosts,512*1024)
             entry={'state':'ok','text':body.decode('utf-8','replace'),'expires':now+TTL}
         except TransportError as e:
+            if e.status==429: self.note_rate(getattr(e,'host',None) or host,e.retry_after)
             if e.status and 400<=e.status<500 and e.status!=429:
                 entry={'state':'unavailable','expires':now+TTL}  # RFC 9309: no usable robots.txt; access allowed
             else:
@@ -173,7 +205,7 @@ class Records:
             store_object(self.objects,hashlib.sha256(body).hexdigest(),data=body)
             return body,final,headers
         except TransportError as e:
-            raise self.transport_problem(e) from None
+            raise self.transport_problem(e,url) from None
     def _read(self,sid,refresh=False,query='',kind='all',limit=100,max_chars=4000):
         s=self.source(sid)
         if kind not in KINDS: raise Problem('input','kind must be one of: '+', '.join(KINDS))
@@ -210,6 +242,7 @@ class Records:
                     text=info['text']; base['text_extraction']=info['text_extraction']
                     if info['pages'] is not None: base['pages']=info['pages']
                     if info['locked']: base['pdf_locked']=True
+                    base.update(pdf_coverage(info))
                 elif ct in ('text/html','application/xhtml+xml'):
                     base['format']='html'; page=Page(final); page.feed(decode_text(b,content_type,html=True)); page.close()
                     base['title']=' '.join(page.title); base['source_dates']=page.dates
@@ -235,13 +268,15 @@ class Records:
             except Problem as e:
                 base.update(ok=False,**{'class':e.kind},reason=str(e),retry=e.retry,retry_after=e.retry_after,evidence_status='quarantined',links=[],text='')
                 if e.kind=='rate':
-                    base['retry_not_before']=now+retry_delay(e.retry_after,now)
+                    base['retry_not_before']=getattr(e,'not_before',None) or now+retry_delay(e.retry_after,now)
             write_json(cache,base)
         result=copy.deepcopy(base); all_links=result.pop('links',[])
         rows=[a for a in all_links if (kind=='all' or a['kind']==kind) and query.casefold() in (a['label']+' '+a['url']).casefold()]
         result['data']=rows[:limit]; result['returned']=len(result['data']); result['filtered_total']=len(rows); result['has_more']=len(rows)>limit
         text=result.pop('text',''); result['text_excerpt']=text[:max_chars]; result['text_truncated']=len(text)>max_chars
         result.pop('cache_created',None); result.pop('cache_format',None)
+        if result.get('class')=='rate' and result.get('retry_not_before'):
+            result.update(retry_fields(result.get('retry_after'),not_before=result['retry_not_before']))
         return result
     def read(self,sid,refresh=False,query='',kind='all',limit=100,max_chars=4000,archive_fallback=False):
         """Read a registered source. If the live page fails, follow the framework's order:
@@ -278,6 +313,8 @@ class Records:
             if result.get('text_truncated'):
                 steps.append('More text is available: add --max-chars (up to 20000).')
             status=result.get('text_status')
+            if result.get('pages_without_text'):
+                steps.append('PDF pages %s have no text layer (probably scanned images), so nothing on them was read. Do not describe those pages; open them or ask the user to.'%result['pages_without_text'])
             if status=='partial':
                 steps.append('Only part of this document\'s text was extracted. Quote only what you can see and say the rest was not read.')
             elif status=='none' and not result.get('pdf_locked'):
@@ -301,7 +338,7 @@ class Records:
                 steps.append('Or ask the user to download it in their own browser, then run: python api.py import-file %s PATH --verify-archive'%sid)
                 if alternates: result['alternates']=alternates
             elif kind=='rate':
-                steps.append('The site asked for a pause. Wait until retry_after has passed; do not retry sooner.')
+                steps.append('The site asked for a pause. Wait until retry_after_seconds have passed (retry_at); do not retry sooner. Other sources on the same site are paused too.')
             elif kind in TRANSIENT:
                 steps.append('Try again later. If this environment cannot reach government sites at all, use your own web tools instead.')
         if steps: result['next_steps']=steps
@@ -337,17 +374,22 @@ class Records:
             state=load_json(gate,None,expect=dict)
             if state:
                 if time.time()<state.get('not_before',0):
-                    return envelope('rate',source_id=sid,reason='Archive Retry-After cooldown is active',retry='after_wait',retry_after_seconds=max(1,int(state['not_before']-time.time())))
-            self.pace('web.archive.org')
+                    return envelope('rate',source_id=sid,reason='Archive Retry-After cooldown is active',retry='after_wait',**retry_fields(not_before=state['not_before']))
+            try: self.pace('web.archive.org')
+            except Problem as e:
+                if e.kind!='rate': raise
+                return envelope('rate',source_id=sid,reason=str(e),retry='after_wait',**retry_fields(not_before=e.not_before))
             try:
                 return operation(s)
             except APIError as e:
-                reason=str(e)
+                reason=str(e); wait={'retry_after':e.retry_after} if e.retry_after is not None else {}
                 if e.category=='rate':
-                    now=time.time()
-                    write_json(gate,{'not_before':now+retry_delay(e.retry_after,now)})
+                    now=time.time(); until=now+retry_delay(e.retry_after,now)
+                    write_json(gate,{'not_before':until})
+                    self.note_rate('web.archive.org',e.retry_after)
+                    wait=retry_fields(e.retry_after,not_before=until,now=now)
                     reason+=' The Internet Archive asks people who think they were blocked in error to email info@archive.org.'
-                return envelope(e.category,source_id=sid,source_url=s['url'],agency=s['agency'],reason=reason,retry=e.retry,retry_after=e.retry_after,evidence_status='quarantined')
+                return envelope(e.category,source_id=sid,source_url=s['url'],agency=s['agency'],reason=reason,retry=e.retry,**wait,evidence_status='quarantined')
     def _archive_cached(self,key,ttl,compute):
         path=self.cache/('archive-'+hashlib.sha256(json.dumps(key).encode()).hexdigest()[:32]+'.json')
         if path.exists() and time.time()-path.stat().st_mtime<ttl:
@@ -412,7 +454,7 @@ class Records:
                 if body.startswith(b'%PDF'):
                     try: info=acquire.pdf_text(body)
                     except ValueError: raise APIError('drift','Archived PDF could not be parsed')
-                    base.update(format='pdf',links=[],text=info['text'],text_status=text_status('pdf',info),text_extraction=info['text_extraction'])
+                    base.update(format='pdf',links=[],text=info['text'],text_status=text_status('pdf',info),text_extraction=info['text_extraction'],**pdf_coverage(info))
                     if info['pages'] is not None: base['pages']=info['pages']
                     if info['locked']: base['pdf_locked']=True
                 elif any(x in ctype for x in ('text/html','application/xhtml+xml')+TEXT_TYPES):
@@ -517,7 +559,7 @@ def main():
     g=sub.add_parser('govinfo',help='Optional: look up the official GovInfo copy of a source (needs your own free key)'); g.add_argument('source_id')
     n=sub.add_parser('nara-search',help='Optional: search the National Archives Catalog API (needs your own key)'); n.add_argument('query'); n.add_argument('--limit',type=int,default=20)
     s=sub.add_parser('serve',help='Run the local read-only API'); s.add_argument('--port',type=int,default=8765)
-    a=p.parse_args()
+    a=p.parse_args(); records=None
     try:
         records=Records(data_dir=a.data_dir)
         if a.cmd=='sources': result=records.list(a.query,a.country,full=a.full)
@@ -545,7 +587,8 @@ def main():
         if isinstance(result,dict) and not result.get('ok',True): raise SystemExit(1)
     except Problem as e: print_json(problem_envelope(e)); raise SystemExit(1)
     except TransportError as e:
-        problem=Records.transport_problem(e); print_json(envelope(problem.kind,reason=str(problem),retry=problem.retry)); raise SystemExit(1)
+        problem=records.transport_problem(e) if records else transport_problem(e)
+        print_json(problem_envelope(problem)); raise SystemExit(1)
     except ValueError as e:
         # Configuration problems (state directory, token file) are reported, not dumped as tracebacks.
         print_json(envelope('input',reason=str(e),retry='after_fix')); raise SystemExit(1)
