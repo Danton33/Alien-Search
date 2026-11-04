@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Alien Search local API (unofficial)",
-    "version": "3.3.0",
+    "version": "3.3.1",
     "description": "Unofficial, user-owned, read-only interface to a fixed register of public government sources. Not affiliated with or endorsed by any government agency. Evidence remains candidate until reviewed. Downloads, ZIP handling, imports and link checks are command-line only."
   },
   "servers": [

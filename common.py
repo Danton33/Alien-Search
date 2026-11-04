@@ -1,13 +1,18 @@
 """Shared result envelope, error type and text decoding for Alien Search modules."""
 import codecs
 import datetime as dt
+import math
 import re
+import time
+from email.utils import parsedate_to_datetime
 
-VERSION = '3.3.0'
+VERSION = '3.3.1'
 UNOFFICIAL = 'Unofficial research tool; not affiliated with or endorsed by any government agency.'
 # Labels encodings the way browsers do: pages declared as Latin-1 or ASCII are really Windows-1252.
 BROWSER_ALIASES = {'iso-8859-1':'cp1252','iso8859-1':'cp1252','latin-1':'cp1252','latin1':'cp1252','us-ascii':'cp1252','ascii':'cp1252'}
 TEXT_TYPES = ('text/plain','text/csv')
+MAX_RETRY_AFTER = 86400  # a server's Retry-After is honoured for at most 24 hours
+DEFAULT_RETRY_AFTER = 3600  # used when a rate limit has no Retry-After, or one that cannot be parsed
 
 
 def utc():
@@ -15,14 +20,47 @@ def utc():
 
 
 class Problem(Exception):
-    def __init__(self, kind, message, retry='after_fix', retry_after=None, next_steps=None):
+    def __init__(self, kind, message, retry='after_fix', retry_after=None, next_steps=None, not_before=None):
         super().__init__(message); self.kind=kind; self.retry=retry; self.retry_after=retry_after
         self.next_steps=list(next_steps or [])
+        self.not_before=not_before  # end of a known pause (epoch seconds), when the tool already worked it out
+
+
+def retry_delay(value, now):
+    """Seconds to wait for a Retry-After header (delta-seconds or HTTP-date), clamped to 1..MAX_RETRY_AFTER.
+
+    A missing or unparseable value means DEFAULT_RETRY_AFTER (one hour)."""
+    try: delay=int(value)
+    except (ValueError,TypeError):
+        try: delay=parsedate_to_datetime(value).timestamp()-now
+        except (ValueError,TypeError,OverflowError): delay=DEFAULT_RETRY_AFTER
+    return min(MAX_RETRY_AFTER,max(1,delay))
+
+
+def iso_utc(seconds):
+    return dt.datetime.fromtimestamp(seconds,dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def retry_fields(retry_after=None, not_before=None, now=None):
+    """The same three retry fields on every result that asks the caller to wait.
+
+    retry_after_seconds: whole seconds still to wait; retry_at: the UTC time it ends;
+    retry_after: the server's own header value, kept as sent when there was one.
+    Give either the raw retry_after value or an absolute not_before (seconds since the epoch).
+    """
+    now=time.time() if now is None else now
+    if not_before is None: not_before=now+retry_delay(retry_after,now)
+    out={'retry_after_seconds':max(1,math.ceil(not_before-now)),'retry_at':iso_utc(not_before)}
+    if retry_after is not None: out['retry_after']=retry_after
+    return out
 
 
 def problem_envelope(e):
-    """Error result with the hints an assistant or agent needs to continue."""
+    """Error result with the hints an assistant or agent needs to continue, including how long to wait."""
     extra={'next_steps':e.next_steps} if getattr(e,'next_steps',None) else {}
+    retry_after=getattr(e,'retry_after',None); not_before=getattr(e,'not_before',None)
+    if retry_after is not None or not_before is not None or e.kind=='rate':
+        extra.update(retry_fields(retry_after,not_before=not_before))
     return envelope(e.kind, reason=str(e), retry=e.retry, **extra)
 
 
@@ -60,11 +98,13 @@ def decode_text(body, content_type='', html=False):
 def text_status(fmt, pdf_info=None, partial=False):
     """How much of a document's text the tool extracted: complete, partial or none.
 
-    none: the format is not read as text, the PDF is locked, or PyMuPDF is not installed.
-    partial: extraction stopped at its limit, so text beyond it was not read.
+    none: the format is not read as text, the PDF is locked, PyMuPDF is not installed, or no page
+    has a text layer (a scan). partial: extraction stopped at its limit, or some pages have no text
+    layer, so part of the document was not read. Reaching the last page is not the same as reading it.
     """
     if fmt=='pdf':
         if not pdf_info or not str(pdf_info.get('text_extraction','')).startswith('pymupdf'): return 'none'
+        if pdf_info.get('has_text') is False or not str(pdf_info.get('text','')).strip(): return 'none'
         return 'complete' if pdf_info.get('text_complete') else 'partial'
     if fmt in ('html','text'): return 'partial' if partial else 'complete'
     return 'none'

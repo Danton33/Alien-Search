@@ -69,7 +69,7 @@ def _call(records,service,url,max_bytes):
         body,_,_=fetch(url,{spec['host']},max_bytes,extra_headers={spec['header']:key})
     except TransportError as e:
         if e.status in (401,403): raise Problem('auth','The '+service+' API rejected the key',"after_fix") from None
-        raise records.transport_problem(e) from None
+        raise records.transport_problem(e,url) from None
     try: return json.loads(body)
     except ValueError: raise Problem('drift','The '+service+' API did not return JSON') from None
 

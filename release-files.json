@@ -46,5 +46,6 @@
   "tests/test_v3.py",
   "tests/test_v31.py",
   "tests/test_v33.py",
+  "tests/test_v331.py",
   "wayback_api.py"
 ]

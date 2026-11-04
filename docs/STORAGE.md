@@ -12,6 +12,7 @@ Research records are JSON-compatible values and reports are Markdown. Source byt
 | `extracted/<sha256>/` and `extracted/<sha256>.json` | Files you chose to extract from a ZIP, and beside the folder a manifest recording which ZIP they came from (3.2 and earlier kept the manifest inside the folder; both are still read) |
 | `imports/` | Index of files you supplied yourself, with their provenance labels |
 | `reports/` | Dated link-check reports |
+| `site-pauses.json` | Sites that asked for a pause (HTTP 429) and when each pause ends. Safe to read; expired entries are dropped automatically |
 | `runtime/` | Local API token and optional API keys. Never sync, share or paste these |
 | `evidence/` or `evidence.sqlite3` | Reviewed records saved with storage.py |
 
@@ -24,7 +25,7 @@ Research records are JSON-compatible values and reports are Markdown. Source byt
 | Assistant files | The starter asks assistants to produce downloadable JSON/Markdown when they can create files. Persistence depends on the app |
 | Drive, Box, Dropbox, object storage or another database | Use your own authorized connector, upload exports manually, or implement the contract below. No cloud connector is included |
 
-Every state file is written to a temporary file first and then swapped into place, so an interruption or a full disk leaves the previous version intact. A damaged cache file is simply rebuilt. A damaged index (downloads, imports, extractions) is renamed `NAME.corrupt-TIMESTAMP` and a new one started, so its history can still be recovered by hand.
+Every state file is written to a temporary file first and then swapped into place, so an interruption or a full disk leaves the previous version intact. A damaged cache file is simply rebuilt. A damaged index (downloads, imports, extractions) is renamed `NAME.corrupt-TIMESTAMP` and a new one started, so its history can still be recovered by hand. Adding to an index is one locked step (a hidden `.NAME.lock` file beside it, left in place on purpose), so two downloads or imports running at once in separate windows both keep their entries.
 
 Keep secrets and the runtime folder local. Move reviewed exports and selected originals separately. Syncing the whole state folder to the cloud would copy the token and any keys; avoid that layout.
 
